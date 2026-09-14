@@ -59,7 +59,7 @@ func Markdown(result model.Result) string {
 	}
 
 	b.WriteString("## Coverage\n\n")
-	b.WriteString("| Merchant | Flyers | Details | Items | Pages | OCR | Status |\n")
+	b.WriteString("| Merchant | Flyers | Details | Items | Raster pages | OCR processed | Status |\n")
 	b.WriteString("|---|---:|---:|---:|---:|---:|---|\n")
 	for _, coverage := range result.Coverage {
 		status := "ok"
@@ -68,14 +68,18 @@ func Markdown(result model.Result) string {
 		} else if len(coverage.Warnings) > 0 {
 			status = "warning: " + strings.Join(coverage.Warnings, "; ")
 		}
-		fmt.Fprintf(&b, "| %s | %d | %d | %d | %d/%d | %d | %s |\n",
+		ocr := fmt.Sprintf("%d", coverage.PagesOCRed)
+		if coverage.PagesFromCache > 0 {
+			ocr += fmt.Sprintf(" (%d cached)", coverage.PagesFromCache)
+		}
+		fmt.Fprintf(&b, "| %s | %d | %d | %d | %d/%d | %s | %s |\n",
 			escape(coverage.Merchant),
 			coverage.FlyersFound,
 			coverage.DetailsFetched,
 			coverage.ItemsScanned,
 			coverage.PageImagesFound,
 			coverage.PagesDeclared,
-			coverage.PagesOCRed,
+			ocr,
 			escape(status),
 		)
 	}

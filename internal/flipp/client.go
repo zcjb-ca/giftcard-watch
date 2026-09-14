@@ -18,7 +18,10 @@ import (
 	"github.com/zcjb-ca/giftcard-watch/internal/model"
 )
 
-const maxResponseBytes = 64 << 20
+const (
+	maxResponseBytes  = 64 << 20
+	targetOCRPageWidth = 1024
+)
 
 type Client struct {
 	baseURL    string
@@ -58,20 +61,24 @@ func (c *Client) ListFlyers(ctx context.Context) ([]model.Flyer, []byte, error) 
 			continue
 		}
 		flyers = append(flyers, model.Flyer{
-			ID:        id,
-			Merchant:  merchant,
-			ValidFrom: firstTime(value, "valid_from", "start_date", "available_from"),
-			ValidTo:   firstTime(value, "valid_to", "end_date", "available_to"),
+			ID:          id,
+			Merchant:    merchant,
+			ValidFrom:   firstTime(value, "valid_from", "start_date", "available_from"),
+			ValidTo:     firstTime(value, "valid_to", "end_date", "available_to"),
+			TilePath:    firstValue(value, "path"),
+			Width:       firstInteger(value, "width"),
+			Height:      firstInteger(value, "height"),
+			Resolutions: numberSlice(value["resolutions"]),
 		})
 	}
 	return flyers, raw, nil
 }
 
-func (c *Client) FetchDetail(ctx context.Context, flyerID string) (Detail, []byte, error) {
-	if flyerID == "" {
+func (c *Client) FetchDetail(ctx context.Context, flyer model.Flyer) (Detail, []byte, error) {
+	if flyer.ID == "" {
 		return Detail{}, nil, errors.New("flyer ID is empty")
 	}
-	root, raw, err := c.getJSON(ctx, "/flyers/"+url.PathEscape(flyerID), "flyer detail")
+	root, raw, err := c.getJSON(ctx, "/flyers/"+url.PathEscape(flyer.ID), "flyer detail")
 	if err != nil {
 		return Detail{}, nil, err
 	}
@@ -80,7 +87,7 @@ func (c *Client) FetchDetail(ctx context.Context, flyerID string) (Detail, []byt
 		return Detail{}, raw, errors.New("flyer detail root is not an object")
 	}
 	items := itemMaps(object)
-	pages, declared, missing := pageList(object["pages"])
+	pages, declared, missing := pageList(object["pages"], flyer)
 	return Detail{
 		Items:             items,
 		Pages:             pages,
@@ -209,30 +216,104 @@ func mapsFromSlice(values []any) []map[string]any {
 	return result
 }
 
-func pageList(value any) ([]model.Page, int, int) {
+func pageList(value any, flyer model.Flyer) ([]model.Page, int, int) {
 	values, ok := value.([]any)
 	if !ok {
 		return nil, 0, 0
 	}
-	pages := make([]model.Page, 0, len(values))
-	missing := 0
+
+	type rawPage struct {
+		number                   int
+		left, bottom, right, top int
+		imageURL                 string
+	}
+	rawPages := make([]rawPage, 0, len(values))
+	canvasBottom := 0
 	for index, value := range values {
-		page := model.Page{Number: index + 1}
+		page := rawPage{number: index + 1}
 		switch typed := value.(type) {
 		case string:
-			page.ImageURL = normalizeImageURL(typed)
+			page.imageURL = normalizeImageURL(typed)
 		case map[string]any:
-			if n := firstInteger(typed, "page_number", "page", "number", "index"); n > 0 {
-				page.Number = n
+			if n := firstSignedInteger(typed, "page_number", "page", "number", "index"); n != 0 {
+				page.number = n
 			}
-			page.ImageURL = bestImageURL(typed)
+			page.left = firstSignedInteger(typed, "left")
+			page.bottom = firstSignedInteger(typed, "bottom")
+			page.right = firstSignedInteger(typed, "right")
+			page.top = firstSignedInteger(typed, "top")
+			page.imageURL = bestImageURL(typed)
+			if page.bottom < canvasBottom {
+				canvasBottom = page.bottom
+			}
 		}
-		if page.ImageURL == "" {
+		rawPages = append(rawPages, page)
+	}
+	if flyer.Height > 0 {
+		canvasBottom = -flyer.Height
+	}
+
+	pages := make([]model.Page, 0, len(rawPages))
+	missing := 0
+	for _, raw := range rawPages {
+		page := model.Page{
+			Number:       raw.number,
+			ImageURL:     raw.imageURL,
+			Left:         raw.left,
+			Bottom:       raw.bottom,
+			Right:        raw.right,
+			Top:          raw.top,
+			CanvasBottom: canvasBottom,
+		}
+		if page.ImageURL == "" && flyer.TilePath != "" && len(flyer.Resolutions) > 0 {
+			page.TileBaseURL = "https://f.wishabi.net/" + strings.TrimPrefix(flyer.TilePath, "/")
+			page.ResolutionIndex, page.Resolution = chooseResolution(
+				flyer.Resolutions,
+				page.Right-page.Left,
+				targetOCRPageWidth,
+			)
+		}
+		if !page.HasRasterSource() {
 			missing++
 		}
 		pages = append(pages, page)
 	}
 	return pages, len(values), missing
+}
+
+func chooseResolution(resolutions []float64, pageWidth, targetWidth int) (int, float64) {
+	if len(resolutions) == 0 {
+		return 0, 0
+	}
+	bestIndex := -1
+	bestPixels := 0.0
+	for index, resolution := range resolutions {
+		if resolution <= 0 {
+			continue
+		}
+		pixels := float64(pageWidth) / resolution
+		if pixels >= float64(targetWidth) && (bestIndex < 0 || pixels < bestPixels) {
+			bestIndex = index
+			bestPixels = pixels
+		}
+	}
+	if bestIndex >= 0 {
+		return bestIndex, resolutions[bestIndex]
+	}
+	for index, resolution := range resolutions {
+		if resolution <= 0 {
+			continue
+		}
+		pixels := float64(pageWidth) / resolution
+		if bestIndex < 0 || pixels > bestPixels {
+			bestIndex = index
+			bestPixels = pixels
+		}
+	}
+	if bestIndex < 0 {
+		return 0, 0
+	}
+	return bestIndex, resolutions[bestIndex]
 }
 
 type imageChoice struct {
@@ -327,6 +408,31 @@ func firstInteger(object map[string]any, keys ...string) int {
 	value := firstValue(object, keys...)
 	n, _ := strconv.Atoi(value)
 	return n
+}
+
+func firstSignedInteger(object map[string]any, keys ...string) int {
+	return firstInteger(object, keys...)
+}
+
+func numberSlice(value any) []float64 {
+	values, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	result := make([]float64, 0, len(values))
+	for _, value := range values {
+		switch typed := value.(type) {
+		case json.Number:
+			if number, err := typed.Float64(); err == nil {
+				result = append(result, number)
+			}
+		case float64:
+			result = append(result, typed)
+		case int:
+			result = append(result, float64(typed))
+		}
+	}
+	return result
 }
 
 func firstTime(object map[string]any, keys ...string) time.Time {

@@ -31,10 +31,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y tesseract-ocr
 
-      - name: Restore notification state
+      - name: Restore notification and OCR state
         uses: actions/cache@v4
         with:
-          path: .giftcard-watch/state.json
+          path: .giftcard-watch
           key: giftcard-watch-state-${{ github.run_id }}
           restore-keys: |
             giftcard-watch-state-
@@ -56,7 +56,8 @@ jobs:
             -config config/config.example.json \
             -output data/result.json \
             -report data/report.md \
-            -state .giftcard-watch/state.json
+            -state .giftcard-watch/state.json \
+            -ocr-cache .giftcard-watch/ocr
           code=$?
           set -e
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"

@@ -8,6 +8,10 @@ type Flyer struct {
 	CanonicalMerchant string
 	ValidFrom         time.Time
 	ValidTo           time.Time
+	TilePath          string
+	Width             int
+	Height            int
+	Resolutions       []float64
 }
 
 func (f Flyer) IsCurrent(now time.Time) bool {
@@ -21,8 +25,24 @@ func (f Flyer) IsCurrent(now time.Time) bool {
 }
 
 type Page struct {
-	Number   int    `json:"number"`
-	ImageURL string `json:"image_url,omitempty"`
+	Number          int     `json:"number"`
+	ImageURL        string  `json:"image_url,omitempty"`
+	Left            int     `json:"left,omitempty"`
+	Bottom          int     `json:"bottom,omitempty"`
+	Right           int     `json:"right,omitempty"`
+	Top             int     `json:"top,omitempty"`
+	TileBaseURL     string  `json:"tile_base_url,omitempty"`
+	ResolutionIndex int     `json:"resolution_index,omitempty"`
+	Resolution      float64 `json:"resolution,omitempty"`
+	CanvasBottom    int     `json:"canvas_bottom,omitempty"`
+}
+
+func (p Page) HasRasterSource() bool {
+	if p.ImageURL != "" {
+		return true
+	}
+	return p.TileBaseURL != "" && p.Resolution > 0 &&
+		p.Right > p.Left && p.Top > p.Bottom
 }
 
 type Source struct {
@@ -68,20 +88,21 @@ type MerchantCoverage struct {
 	PagesDeclared     int      `json:"pages_declared"`
 	PageImagesFound   int      `json:"page_images_found"`
 	PagesOCRed        int      `json:"pages_ocr_ed"`
+	PagesFromCache    int      `json:"pages_from_cache"`
 	CorrectionsMarked int      `json:"corrections_marked"`
 	Warnings          []string `json:"warnings,omitempty"`
 	Errors            []string `json:"errors,omitempty"`
 }
 
 type Result struct {
-	GeneratedAt          time.Time          `json:"generated_at"`
-	LocationLabel        string             `json:"location_label,omitempty"`
-	Complete             bool               `json:"complete"`
-	Warnings             []string           `json:"warnings,omitempty"`
-	Errors               []string           `json:"errors,omitempty"`
-	Coverage             []MerchantCoverage `json:"coverage"`
-	Candidates           []Candidate        `json:"candidates"`
-	QualifyingOffers     []Candidate        `json:"qualifying_offers"`
-	NewQualifyingOffers  []Candidate        `json:"new_qualifying_offers"`
-	NewReviewCandidates  []Candidate        `json:"new_review_candidates"`
+	GeneratedAt         time.Time          `json:"generated_at"`
+	LocationLabel       string             `json:"location_label,omitempty"`
+	Complete            bool               `json:"complete"`
+	Warnings            []string           `json:"warnings,omitempty"`
+	Errors              []string           `json:"errors,omitempty"`
+	Coverage            []MerchantCoverage `json:"coverage"`
+	Candidates          []Candidate        `json:"candidates"`
+	QualifyingOffers    []Candidate        `json:"qualifying_offers"`
+	NewQualifyingOffers []Candidate        `json:"new_qualifying_offers"`
+	NewReviewCandidates []Candidate        `json:"new_review_candidates"`
 }

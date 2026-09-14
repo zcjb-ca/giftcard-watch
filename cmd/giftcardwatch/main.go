@@ -20,6 +20,7 @@ func main() {
 		jsonPath   = flag.String("output", "data/result.json", "path for JSON report")
 		reportPath = flag.String("report", "data/report.md", "path for Markdown report")
 		statePath  = flag.String("state", ".giftcard-watch/state.json", "path for deduplication state")
+		ocrCache   = flag.String("ocr-cache", ".giftcard-watch/ocr", "directory for OCR text cache")
 		rawDir     = flag.String("raw-dir", "", "optional directory for raw API snapshots")
 		noOCR      = flag.Bool("no-ocr", false, "disable OCR for a diagnostic structured-data-only run")
 		strict     = flag.Bool("strict", false, "exit with status 2 when coverage is incomplete")
@@ -38,7 +39,10 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	result := app.Run(ctx, cfg, app.Options{RawDirectory: *rawDir})
+	result := app.Run(ctx, cfg, app.Options{
+		RawDirectory:      *rawDir,
+		OCRCacheDirectory: *ocrCache,
+	})
 	if err := state.Apply(&result, *statePath); err != nil {
 		result.Complete = false
 		result.Errors = append(result.Errors, err.Error())

@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,8 +20,9 @@ import (
 )
 
 type Options struct {
-	RawDirectory string
-	Now          func() time.Time
+	RawDirectory      string
+	OCRCacheDirectory string
+	Now               func() time.Time
 }
 
 func Run(ctx context.Context, cfg config.Config, options Options) model.Result {
@@ -118,7 +121,7 @@ func Run(ctx context.Context, cfg config.Config, options Options) model.Result {
 		index := coverageIndex[flyer.CanonicalMerchant]
 		coverage := &result.Coverage[index]
 
-		detail, rawDetail, err := client.FetchDetail(ctx, flyer.ID)
+		detail, rawDetail, err := client.FetchDetail(ctx, flyer)
 		if err != nil {
 			coverage.Errors = append(coverage.Errors, fmt.Sprintf("flyer %s detail: %v", flyer.ID, err))
 			result.Complete = false
@@ -168,30 +171,46 @@ func Run(ctx context.Context, cfg config.Config, options Options) model.Result {
 		coverage.PagesDeclared += detail.DeclaredPages
 		coverage.PageImagesFound += detail.DeclaredPages - detail.MissingPageImages
 		if cfg.OCR.Required && detail.DeclaredPages == 0 {
-			coverage.Errors = append(coverage.Errors, fmt.Sprintf("flyer %s exposed no page images for OCR", flyer.ID))
+			coverage.Errors = append(coverage.Errors, fmt.Sprintf("flyer %s exposed no page geometry for OCR", flyer.ID))
 			result.Complete = false
 		}
 		if cfg.OCR.Required && detail.MissingPageImages > 0 {
 			coverage.Errors = append(coverage.Errors,
-				fmt.Sprintf("flyer %s has %d page records without a usable image URL", flyer.ID, detail.MissingPageImages))
+				fmt.Sprintf("flyer %s has %d page records without a usable raster source", flyer.ID, detail.MissingPageImages))
 			result.Complete = false
 		}
 
 		if !ocrReady {
 			continue
 		}
+		fingerprint := detailFingerprint(rawDetail)
 		for _, page := range detail.Pages {
-			if page.ImageURL == "" {
+			if !page.HasRasterSource() {
 				continue
 			}
-			text, err := ocrEngine.ScanPage(ctx, page)
+
+			text, cached, err := cachedOCR(options.OCRCacheDirectory, flyer.ID, page.Number, fingerprint)
 			if err != nil {
-				coverage.Errors = append(coverage.Errors,
-					fmt.Sprintf("flyer %s page %d OCR: %v", flyer.ID, page.Number, err))
-				result.Complete = false
-				continue
+				coverage.Warnings = append(coverage.Warnings,
+					fmt.Sprintf("flyer %s page %d OCR cache read: %v", flyer.ID, page.Number, err))
 			}
-			coverage.PagesOCRed++
+			if cached {
+				coverage.PagesOCRed++
+				coverage.PagesFromCache++
+			} else {
+				text, err = ocrEngine.ScanPage(ctx, page)
+				if err != nil {
+					coverage.Errors = append(coverage.Errors,
+						fmt.Sprintf("flyer %s page %d OCR: %v", flyer.ID, page.Number, err))
+					result.Complete = false
+					continue
+				}
+				coverage.PagesOCRed++
+				if err := saveOCR(options.OCRCacheDirectory, flyer.ID, page.Number, fingerprint, text); err != nil {
+					coverage.Warnings = append(coverage.Warnings,
+						fmt.Sprintf("flyer %s page %d OCR cache write: %v", flyer.ID, page.Number, err))
+				}
+			}
 			if strings.TrimSpace(text) == "" {
 				coverage.Errors = append(coverage.Errors,
 					fmt.Sprintf("flyer %s page %d OCR returned no text", flyer.ID, page.Number))
@@ -228,6 +247,45 @@ func Run(ctx context.Context, cfg config.Config, options Options) model.Result {
 		return left.ID < right.ID
 	})
 	return result
+}
+
+func cachedOCR(directory, flyerID string, page int, fingerprint string) (string, bool, error) {
+	if directory == "" {
+		return "", false, nil
+	}
+	body, err := os.ReadFile(ocrCachePath(directory, flyerID, page, fingerprint))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return string(body), true, nil
+}
+
+func saveOCR(directory, flyerID string, page int, fingerprint, text string) error {
+	if directory == "" {
+		return nil
+	}
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	path := ocrCachePath(directory, flyerID, page, fingerprint)
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, []byte(text), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
+}
+
+func ocrCachePath(directory, flyerID string, page int, fingerprint string) string {
+	name := safeName(fmt.Sprintf("%s-page-%d-%s.txt", flyerID, page, fingerprint))
+	return filepath.Join(directory, name)
+}
+
+func detailFingerprint(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:8])
 }
 
 func writeRaw(directory, name string, body []byte) error {
