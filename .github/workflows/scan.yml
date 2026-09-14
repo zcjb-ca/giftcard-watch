@@ -1,0 +1,142 @@
+name: Scan gift-card flyers
+
+on:
+  schedule:
+    - cron: "30 14 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: giftcard-watch-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install OCR
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr
+
+      - name: Restore notification and OCR state
+        uses: actions/cache@v4
+        with:
+          path: .giftcard-watch
+          key: giftcard-watch-state-${{ github.run_id }}
+          restore-keys: |
+            giftcard-watch-state-
+
+      - name: Scan flyers
+        id: scan
+        env:
+          GIFTWATCH_POSTAL_CODE: ${{ secrets.POSTAL_CODE }}
+        run: |
+          mkdir -p data
+          if [[ -z "$GIFTWATCH_POSTAL_CODE" ]]; then
+            echo "POSTAL_CODE secret is not configured" >&2
+            echo "exit_code=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          set +e
+          go run ./cmd/giftcardwatch \
+            -config config/config.example.json \
+            -output data/result.json \
+            -report data/report.md \
+            -state .giftcard-watch/state.json \
+            -ocr-cache .giftcard-watch/ocr
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Add Actions summary
+        if: always()
+        run: |
+          if [[ -f data/report.md ]]; then
+            cat data/report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "# Gift-card watch failed"
+              echo
+              echo "The scanner stopped before it could produce a report."
+            } | tee data/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Inspect result
+        id: inspect
+        if: always()
+        run: |
+          if [[ -f data/result.json ]]; then
+            new_offers=$(jq '.new_qualifying_offers | length' data/result.json)
+            new_reviews=$(jq '.new_review_candidates | length' data/result.json)
+            complete=$(jq -r '.complete' data/result.json)
+          else
+            new_offers=0
+            new_reviews=0
+            complete=false
+          fi
+
+          alert=false
+          if [[ "$new_offers" -gt 0 || "$new_reviews" -gt 0 || "$complete" != "true" ]]; then
+            alert=true
+          fi
+          echo "new_offers=$new_offers" >> "$GITHUB_OUTPUT"
+          echo "new_reviews=$new_reviews" >> "$GITHUB_OUTPUT"
+          echo "complete=$complete" >> "$GITHUB_OUTPUT"
+          echo "alert=$alert" >> "$GITHUB_OUTPUT"
+
+      - name: Publish report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: giftcard-watch-report-${{ github.run_id }}
+          path: |
+            data/result.json
+            data/report.md
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Notify through rolling issue
+        if: always() && steps.inspect.outputs.alert == 'true' && vars.ENABLE_ISSUES == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          issue_number=$(gh issue list \
+            --state open \
+            --search '"Gift-card watch alerts" in:title' \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [[ -n "$issue_number" ]]; then
+            gh issue comment "$issue_number" --body-file data/report.md
+          else
+            gh issue create --title "Gift-card watch alerts" --body-file data/report.md
+          fi
+
+      - name: Enforce successful complete scan
+        if: always()
+        env:
+          PROGRAM_EXIT: ${{ steps.scan.outputs.exit_code }}
+          COMPLETE: ${{ steps.inspect.outputs.complete }}
+        run: |
+          if [[ "$PROGRAM_EXIT" != "0" ]]; then
+            echo "Scanner exited with status $PROGRAM_EXIT" >&2
+            exit 1
+          fi
+          if [[ "$COMPLETE" != "true" ]]; then
+            echo "Scan coverage was incomplete" >&2
+            exit 1
+          fi

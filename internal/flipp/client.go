@@ -1,0 +1,530 @@
+package flipp
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"net/url"
+	"path"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/zcjb-ca/giftcard-watch/internal/model"
+)
+
+const (
+	maxResponseBytes  = 64 << 20
+	targetOCRPageWidth = 1024
+)
+
+type Client struct {
+	baseURL      string
+	assetBaseURL string
+	locale     string
+	postalCode string
+	http       *http.Client
+}
+
+type Detail struct {
+	Items             []map[string]any
+	Pages             []model.Page
+	DeclaredPages     int
+	MissingPageImages int
+	HasCorrections    bool
+}
+
+func New(baseURL, assetBaseURL, locale, postalCode string, timeout time.Duration) *Client {
+	return &Client{
+		baseURL:      strings.TrimRight(baseURL, "/"),
+		assetBaseURL: strings.TrimRight(assetBaseURL, "/"),
+		locale:     locale,
+		postalCode: postalCode,
+		http:       &http.Client{Timeout: timeout},
+	}
+}
+
+func (c *Client) ListFlyers(ctx context.Context) ([]model.Flyer, []byte, error) {
+	root, raw, err := c.getJSON(ctx, "/flyers", "flyer list")
+	if err != nil {
+		return nil, nil, err
+	}
+	flyers := parseFlyers(flyerMaps(root))
+	if needsTileMetadata(flyers) {
+		assetRoot, _, err := c.getAssetJSON(ctx, "/data", "flyer tile metadata")
+		if err != nil {
+			return nil, raw, err
+		}
+		mergeTileMetadata(flyers, parseFlyers(flyerMaps(assetRoot)))
+	}
+	return flyers, raw, nil
+}
+
+func (c *Client) FetchDetail(ctx context.Context, flyer model.Flyer) (Detail, []byte, error) {
+	if flyer.ID == "" {
+		return Detail{}, nil, errors.New("flyer ID is empty")
+	}
+	root, raw, err := c.getJSON(ctx, "/flyers/"+url.PathEscape(flyer.ID), "flyer detail")
+	if err != nil {
+		return Detail{}, nil, err
+	}
+	object, ok := root.(map[string]any)
+	if !ok {
+		return Detail{}, raw, errors.New("flyer detail root is not an object")
+	}
+	items := itemMaps(object)
+	pages, declared, missing := pageList(object["pages"], flyer)
+	return Detail{
+		Items:             items,
+		Pages:             pages,
+		DeclaredPages:     declared,
+		MissingPageImages: missing,
+		HasCorrections:    boolValue(object["has_corrections"]),
+	}, raw, nil
+}
+
+func (c *Client) getJSON(ctx context.Context, endpoint, label string) (any, []byte, error) {
+	return c.getJSONFrom(ctx, c.baseURL, c.locale, endpoint, label, nil)
+}
+
+func (c *Client) getAssetJSON(ctx context.Context, endpoint, label string) (any, []byte, error) {
+	locale := strings.SplitN(c.locale, "-", 2)[0]
+	extra := url.Values{}
+	extra.Set("sid", strconv.FormatInt(time.Now().UnixNano(), 10))
+	return c.getJSONFrom(ctx, c.assetBaseURL, locale, endpoint, label, extra)
+}
+
+func (c *Client) getJSONFrom(
+	ctx context.Context,
+	baseURL, locale, endpoint, label string,
+	extra url.Values,
+) (any, []byte, error) {
+	requestURL, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: invalid base URL: %w", label, err)
+	}
+	requestURL.Path = path.Join(requestURL.Path, endpoint)
+	query := requestURL.Query()
+	query.Set("locale", locale)
+	query.Set("postal_code", c.postalCode)
+	for key, values := range extra {
+		for _, value := range values {
+			query.Add(key, value)
+		}
+	}
+	requestURL.RawQuery = query.Encode()
+
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(attempt) * 400 * time.Millisecond
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, nil, ctx.Err()
+			case <-timer.C:
+			}
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: create request: %w", label, err)
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "giftcard-watch/0.1 (+https://github.com/zcjb-ca/giftcard-watch)")
+		req.Header.Set("Referer", "https://flipp.com/")
+		req.Header.Set("Origin", "https://flipp.com")
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("%s request failed: %w", label, err)
+			continue
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+		resp.Body.Close()
+		if readErr != nil {
+			lastErr = fmt.Errorf("%s response read failed: %w", label, readErr)
+			continue
+		}
+		if len(body) > maxResponseBytes {
+			return nil, nil, fmt.Errorf("%s response exceeded %d bytes", label, maxResponseBytes)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			lastErr = fmt.Errorf("%s returned HTTP %d", label, resp.StatusCode)
+			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+				continue
+			}
+			return nil, nil, lastErr
+		}
+
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.UseNumber()
+		var root any
+		if err := decoder.Decode(&root); err != nil {
+			return nil, body, fmt.Errorf("%s returned invalid JSON: %w", label, err)
+		}
+		return root, body, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("%s failed after retries", label)
+	}
+	return nil, nil, lastErr
+}
+
+func parseFlyers(values []map[string]any) []model.Flyer {
+	flyers := make([]model.Flyer, 0, len(values))
+	for _, value := range values {
+		id := firstValue(value, "id", "flyer_id")
+		merchant := firstValue(value, "merchant_name", "merchant", "name")
+		if id == "" || merchant == "" {
+			continue
+		}
+		flyers = append(flyers, model.Flyer{
+			ID:          id,
+			Merchant:    merchant,
+			ValidFrom:   firstTime(value, "valid_from", "start_date", "available_from"),
+			ValidTo:     firstTime(value, "valid_to", "end_date", "available_to"),
+			TilePath:    firstValue(value, "path"),
+			Width:       firstInteger(value, "width"),
+			Height:      firstInteger(value, "height"),
+			Resolutions: numberSlice(value["resolutions"]),
+		})
+	}
+	return flyers
+}
+
+func needsTileMetadata(flyers []model.Flyer) bool {
+	for _, flyer := range flyers {
+		if flyer.TilePath == "" || len(flyer.Resolutions) == 0 || flyer.Height <= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeTileMetadata(flyers, metadata []model.Flyer) {
+	byID := make(map[string]model.Flyer, len(metadata))
+	for _, flyer := range metadata {
+		byID[flyer.ID] = flyer
+	}
+	for index := range flyers {
+		source, ok := byID[flyers[index].ID]
+		if !ok {
+			continue
+		}
+		if flyers[index].TilePath == "" {
+			flyers[index].TilePath = source.TilePath
+		}
+		if flyers[index].Width <= 0 {
+			flyers[index].Width = source.Width
+		}
+		if flyers[index].Height <= 0 {
+			flyers[index].Height = source.Height
+		}
+		if len(flyers[index].Resolutions) == 0 {
+			flyers[index].Resolutions = source.Resolutions
+		}
+	}
+}
+
+func flyerMaps(root any) []map[string]any {
+	if values, ok := root.([]any); ok {
+		return mapsFromSlice(values)
+	}
+	object, ok := root.(map[string]any)
+	if !ok {
+		return nil
+	}
+	for _, key := range []string{"flyers", "publications", "results"} {
+		if values, ok := object[key].([]any); ok {
+			return mapsFromSlice(values)
+		}
+	}
+	return nil
+}
+
+func itemMaps(root map[string]any) []map[string]any {
+	for _, key := range []string{"items", "flyer_items", "ecom_items"} {
+		if values, ok := root[key].([]any); ok {
+			return mapsFromSlice(values)
+		}
+	}
+	keys := make([]string, 0, len(root))
+	for key := range root {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		values, ok := root[key].([]any)
+		if !ok {
+			continue
+		}
+		maps := mapsFromSlice(values)
+		for _, value := range maps {
+			if firstValue(value, "name", "short_name", "description") != "" {
+				return maps
+			}
+		}
+	}
+	return nil
+}
+
+func mapsFromSlice(values []any) []map[string]any {
+	result := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		if object, ok := value.(map[string]any); ok {
+			result = append(result, object)
+		}
+	}
+	return result
+}
+
+func pageList(value any, flyer model.Flyer) ([]model.Page, int, int) {
+	values, ok := value.([]any)
+	if !ok {
+		return nil, 0, 0
+	}
+
+	type rawPage struct {
+		number                   int
+		left, bottom, right, top int
+		imageURL                 string
+	}
+	rawPages := make([]rawPage, 0, len(values))
+	canvasBottom := 0
+	for index, value := range values {
+		page := rawPage{number: index + 1}
+		switch typed := value.(type) {
+		case string:
+			page.imageURL = normalizeImageURL(typed)
+		case map[string]any:
+			if n := firstSignedInteger(typed, "page_number", "page", "number", "index"); n != 0 {
+				page.number = n
+			}
+			page.left = firstSignedInteger(typed, "left")
+			page.bottom = firstSignedInteger(typed, "bottom")
+			page.right = firstSignedInteger(typed, "right")
+			page.top = firstSignedInteger(typed, "top")
+			page.imageURL = bestImageURL(typed)
+			if page.bottom < canvasBottom {
+				canvasBottom = page.bottom
+			}
+		}
+		rawPages = append(rawPages, page)
+	}
+	if flyer.Height > 0 {
+		canvasBottom = -flyer.Height
+	}
+
+	pages := make([]model.Page, 0, len(rawPages))
+	missing := 0
+	for _, raw := range rawPages {
+		page := model.Page{
+			Number:       raw.number,
+			ImageURL:     raw.imageURL,
+			Left:         raw.left,
+			Bottom:       raw.bottom,
+			Right:        raw.right,
+			Top:          raw.top,
+			CanvasBottom: canvasBottom,
+		}
+		if page.ImageURL == "" && flyer.TilePath != "" && len(flyer.Resolutions) > 0 {
+			page.TileBaseURL = "https://f.wishabi.net/" + strings.TrimPrefix(flyer.TilePath, "/")
+			page.ResolutionIndex, page.Resolution = chooseResolution(
+				flyer.Resolutions,
+				page.Right-page.Left,
+				targetOCRPageWidth,
+			)
+		}
+		if !page.HasRasterSource() {
+			missing++
+		}
+		pages = append(pages, page)
+	}
+	return pages, len(values), missing
+}
+
+func chooseResolution(resolutions []float64, pageWidth, targetWidth int) (int, float64) {
+	if len(resolutions) == 0 {
+		return 0, 0
+	}
+	bestIndex := -1
+	bestPixels := 0.0
+	for index, resolution := range resolutions {
+		if resolution <= 0 {
+			continue
+		}
+		pixels := float64(pageWidth) / resolution
+		if pixels >= float64(targetWidth) && (bestIndex < 0 || pixels < bestPixels) {
+			bestIndex = index
+			bestPixels = pixels
+		}
+	}
+	if bestIndex >= 0 {
+		return bestIndex, resolutions[bestIndex]
+	}
+	for index, resolution := range resolutions {
+		if resolution <= 0 {
+			continue
+		}
+		pixels := float64(pageWidth) / resolution
+		if bestIndex < 0 || pixels > bestPixels {
+			bestIndex = index
+			bestPixels = pixels
+		}
+	}
+	if bestIndex < 0 {
+		return 0, 0
+	}
+	return bestIndex, resolutions[bestIndex]
+}
+
+type imageChoice struct {
+	url   string
+	score int
+}
+
+func bestImageURL(root map[string]any) string {
+	choices := make([]imageChoice, 0)
+	var visit func(any, string)
+	visit = func(value any, keyPath string) {
+		switch typed := value.(type) {
+		case map[string]any:
+			keys := make([]string, 0, len(typed))
+			for key := range typed {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				visit(typed[key], keyPath+"."+strings.ToLower(key))
+			}
+		case []any:
+			for _, child := range typed {
+				visit(child, keyPath)
+			}
+		case string:
+			candidate := normalizeImageURL(typed)
+			if candidate == "" {
+				return
+			}
+			score := 0
+			for token, points := range map[string]int{
+				"image": 6, "scan": 6, "zoom": 5, "large": 4,
+				"high": 4, "page": 3, "url": 1, "thumb": -5,
+				"cutout": -6, "logo": -6,
+			} {
+				if strings.Contains(keyPath, token) {
+					score += points
+				}
+			}
+			lowerURL := strings.ToLower(candidate)
+			if strings.Contains(lowerURL, ".jpg") || strings.Contains(lowerURL, ".jpeg") ||
+				strings.Contains(lowerURL, ".png") || strings.Contains(lowerURL, ".webp") {
+				score += 2
+			}
+			if score > 0 {
+				choices = append(choices, imageChoice{url: candidate, score: score})
+			}
+		}
+	}
+	visit(root, "")
+	sort.SliceStable(choices, func(i, j int) bool { return choices[i].score > choices[j].score })
+	if len(choices) == 0 {
+		return ""
+	}
+	return choices[0].url
+}
+
+func normalizeImageURL(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "http://") {
+		value = "https://" + strings.TrimPrefix(value, "http://")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return ""
+	}
+	return value
+}
+
+func firstValue(object map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := object[key]; ok {
+			switch typed := value.(type) {
+			case string:
+				if strings.TrimSpace(typed) != "" {
+					return strings.TrimSpace(typed)
+				}
+			case json.Number:
+				return typed.String()
+			case float64:
+				return strconv.FormatFloat(typed, 'f', -1, 64)
+			case int:
+				return strconv.Itoa(typed)
+			}
+		}
+	}
+	return ""
+}
+
+func firstInteger(object map[string]any, keys ...string) int {
+	value := firstValue(object, keys...)
+	if n, err := strconv.Atoi(value); err == nil {
+		return n
+	}
+	n, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0
+	}
+	return int(math.Round(n))
+}
+
+func firstSignedInteger(object map[string]any, keys ...string) int {
+	return firstInteger(object, keys...)
+}
+
+func numberSlice(value any) []float64 {
+	values, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	result := make([]float64, 0, len(values))
+	for _, value := range values {
+		switch typed := value.(type) {
+		case json.Number:
+			if number, err := typed.Float64(); err == nil {
+				result = append(result, number)
+			}
+		case float64:
+			result = append(result, typed)
+		case int:
+			result = append(result, float64(typed))
+		}
+	}
+	return result
+}
+
+func firstTime(object map[string]any, keys ...string) time.Time {
+	value := firstValue(object, keys...)
+	if value == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02", "2006-01-02 15:04:05"} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
+func boolValue(value any) bool {
+	typed, _ := value.(bool)
+	return typed
+}

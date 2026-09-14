@@ -1,0 +1,16 @@
+{
+  "base_url": "https://backflipp.wishabi.com/flipp",
+  "asset_base_url": "https://dam.flippenterprise.net/api/flipp",
+  "locale": "en-ca",
+  "postal_code": "",
+  "location_label": "Ottawa, ON",
+  "minimum_return_percent": 8,
+  "http_timeout_seconds": 25,
+  "ocr": {
+    "enabled": true,
+    "required": true,
+    "command": "tesseract",
+    "language": "eng",
+    "page_timeout_seconds": 45
+  }
+}
