@@ -126,7 +126,7 @@ func (a *Analyzer) matchBrands(text string) []string {
 	found := make([]string, 0)
 	for _, brand := range a.cfg.Brands {
 		for _, alias := range append([]string{brand.Name}, brand.Aliases...) {
-			if strings.Contains(lower, strings.ToLower(alias)) {
+			if containsAlias(lower, strings.ToLower(alias)) {
 				found = append(found, brand.Name)
 				break
 			}
@@ -134,6 +134,32 @@ func (a *Analyzer) matchBrands(text string) []string {
 	}
 	sort.Strings(found)
 	return found
+}
+
+func containsAlias(text, alias string) bool {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return false
+	}
+	for offset := 0; offset <= len(text)-len(alias); {
+		index := strings.Index(text[offset:], alias)
+		if index < 0 {
+			return false
+		}
+		start := offset + index
+		end := start + len(alias)
+		beforeOK := start == 0 || !isASCIIAlphaNumeric(text[start-1])
+		afterOK := end == len(text) || !isASCIIAlphaNumeric(text[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		offset = start + 1
+	}
+	return false
+}
+
+func isASCIIAlphaNumeric(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= '0' && value <= '9'
 }
 
 func (a *Analyzer) pointProgram(text string) (config.PointProgram, bool) {
