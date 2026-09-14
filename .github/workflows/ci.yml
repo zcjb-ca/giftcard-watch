@@ -15,10 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: false
@@ -32,4 +32,4 @@ jobs:
       - name: Verify live Flipp contract
         env:
           FLIPP_SMOKE_POSTAL_CODE: K1P1J1
-        run: go test -tags=integration ./internal/flipp -run TestLiveContract -v
+        run: go test -tags=integration ./internal/flipp ./internal/scan -run TestLive -v
