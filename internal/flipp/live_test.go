@@ -55,7 +55,14 @@ func TestLiveContract(t *testing.T) {
 			continue
 		}
 		if detail.DeclaredPages-detail.MissingPageImages == 0 {
-			failures = append(failures, fmt.Sprintf("%s: no usable page raster source", flyer.ID))
+			page := "<none>"
+			if len(detail.Pages) > 0 {
+				page = fmt.Sprintf("%+v", detail.Pages[0])
+			}
+			failures = append(failures, fmt.Sprintf(
+				"%s: no usable page raster source; tile=%q width=%d height=%d resolutions=%v first_page=%s",
+				flyer.ID, flyer.TilePath, flyer.Width, flyer.Height, flyer.Resolutions, page,
+			))
 			continue
 		}
 		t.Logf("verified flyer %s (%s): %d items, %d pages, tile path present=%v",
