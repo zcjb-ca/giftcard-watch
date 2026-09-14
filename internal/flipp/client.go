@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -475,8 +476,14 @@ func firstValue(object map[string]any, keys ...string) string {
 
 func firstInteger(object map[string]any, keys ...string) int {
 	value := firstValue(object, keys...)
-	n, _ := strconv.Atoi(value)
-	return n
+	if n, err := strconv.Atoi(value); err == nil {
+		return n
+	}
+	n, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0
+	}
+	return int(math.Round(n))
 }
 
 func firstSignedInteger(object map[string]any, keys ...string) int {

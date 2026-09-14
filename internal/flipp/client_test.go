@@ -34,15 +34,15 @@ func TestListAndDetail(t *testing.T) {
 					"id":123,
 					"merchant":"Canadian Tire",
 					"path":"flyers/example/",
-					"width":4168,
-					"height":2560,
+					"width":4168.0,
+					"height":2560.0,
 					"resolutions":[4,2,1]
 				}]
 			}`))
 		case "/flipp/flyers/123":
 			_, _ = w.Write([]byte(`{
 				"items":[{"id":9,"name":"Collect $10 CT Money for every $100 spent on Indigo gift cards"}],
-				"pages":[{"id":77,"page":2,"left":2084,"bottom":-2560,"right":4168,"top":0}],
+				"pages":[{"id":77,"page":2,"left":2084.0,"bottom":-2560.0,"right":4168.0,"top":0.0}],
 				"has_corrections":true
 			}`))
 		default:
@@ -59,7 +59,8 @@ func TestListAndDetail(t *testing.T) {
 	if len(flyers) != 1 || flyers[0].ID != "123" || flyers[0].Merchant != "Canadian Tire" {
 		t.Fatalf("unexpected flyers: %#v", flyers)
 	}
-	if flyers[0].TilePath != "flyers/example/" || len(flyers[0].Resolutions) != 3 {
+	if flyers[0].TilePath != "flyers/example/" || len(flyers[0].Resolutions) != 3 ||
+		flyers[0].Width != 4168 || flyers[0].Height != 2560 {
 		t.Fatalf("tile metadata = %#v", flyers[0])
 	}
 
