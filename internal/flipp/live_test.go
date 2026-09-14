@@ -20,6 +20,7 @@ func TestLiveContract(t *testing.T) {
 	defer cancel()
 	client := New(
 		"https://backflipp.wishabi.com/flipp",
+		"https://dam.flippenterprise.net/api/flipp",
 		"en-ca",
 		postalCode,
 		20*time.Second,

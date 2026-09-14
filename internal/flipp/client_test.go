@@ -22,6 +22,17 @@ func TestListAndDetail(t *testing.T) {
 					"merchant":"Canadian Tire",
 					"valid_from":"2026-09-10T00:00:00-04:00",
 					"valid_to":"2026-09-17T23:59:59-04:00",
+					"path":"",
+					"width":0,
+					"height":0,
+					"resolutions":[]
+				}]
+			}`))
+		case "/flipp-assets/data":
+			_, _ = w.Write([]byte(`{
+				"flyers":[{
+					"id":123,
+					"merchant":"Canadian Tire",
 					"path":"flyers/example/",
 					"width":4168,
 					"height":2560,
@@ -40,7 +51,7 @@ func TestListAndDetail(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := New(server.URL+"/flipp", "en-ca", "K1P1J1", 2*time.Second)
+	client := New(server.URL+"/flipp", server.URL+"/flipp-assets", "en-ca", "K1P1J1", 2*time.Second)
 	flyers, _, err := client.ListFlyers(context.Background())
 	if err != nil {
 		t.Fatalf("ListFlyers() error = %v", err)

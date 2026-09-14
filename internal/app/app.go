@@ -47,6 +47,7 @@ func Run(ctx context.Context, cfg config.Config, options Options) model.Result {
 
 	client := flipp.New(
 		cfg.BaseURL,
+		cfg.AssetBaseURL,
 		cfg.Locale,
 		cfg.PostalCode,
 		time.Duration(cfg.HTTPTimeoutSeconds)*time.Second,

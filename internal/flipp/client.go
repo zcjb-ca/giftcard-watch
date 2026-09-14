@@ -24,7 +24,8 @@ const (
 )
 
 type Client struct {
-	baseURL    string
+	baseURL      string
+	assetBaseURL string
 	locale     string
 	postalCode string
 	http       *http.Client
@@ -38,9 +39,10 @@ type Detail struct {
 	HasCorrections    bool
 }
 
-func New(baseURL, locale, postalCode string, timeout time.Duration) *Client {
+func New(baseURL, assetBaseURL, locale, postalCode string, timeout time.Duration) *Client {
 	return &Client{
-		baseURL:    strings.TrimRight(baseURL, "/"),
+		baseURL:      strings.TrimRight(baseURL, "/"),
+		assetBaseURL: strings.TrimRight(assetBaseURL, "/"),
 		locale:     locale,
 		postalCode: postalCode,
 		http:       &http.Client{Timeout: timeout},
@@ -52,24 +54,13 @@ func (c *Client) ListFlyers(ctx context.Context) ([]model.Flyer, []byte, error) 
 	if err != nil {
 		return nil, nil, err
 	}
-	maps := flyerMaps(root)
-	flyers := make([]model.Flyer, 0, len(maps))
-	for _, value := range maps {
-		id := firstValue(value, "id", "flyer_id")
-		merchant := firstValue(value, "merchant_name", "merchant", "name")
-		if id == "" || merchant == "" {
-			continue
+	flyers := parseFlyers(flyerMaps(root))
+	if needsTileMetadata(flyers) {
+		assetRoot, _, err := c.getAssetJSON(ctx, "/data", "flyer tile metadata")
+		if err != nil {
+			return nil, raw, err
 		}
-		flyers = append(flyers, model.Flyer{
-			ID:          id,
-			Merchant:    merchant,
-			ValidFrom:   firstTime(value, "valid_from", "start_date", "available_from"),
-			ValidTo:     firstTime(value, "valid_to", "end_date", "available_to"),
-			TilePath:    firstValue(value, "path"),
-			Width:       firstInteger(value, "width"),
-			Height:      firstInteger(value, "height"),
-			Resolutions: numberSlice(value["resolutions"]),
-		})
+		mergeTileMetadata(flyers, parseFlyers(flyerMaps(assetRoot)))
 	}
 	return flyers, raw, nil
 }
@@ -98,14 +89,34 @@ func (c *Client) FetchDetail(ctx context.Context, flyer model.Flyer) (Detail, []
 }
 
 func (c *Client) getJSON(ctx context.Context, endpoint, label string) (any, []byte, error) {
-	requestURL, err := url.Parse(c.baseURL)
+	return c.getJSONFrom(ctx, c.baseURL, c.locale, endpoint, label, nil)
+}
+
+func (c *Client) getAssetJSON(ctx context.Context, endpoint, label string) (any, []byte, error) {
+	locale := strings.SplitN(c.locale, "-", 2)[0]
+	extra := url.Values{}
+	extra.Set("sid", strconv.FormatInt(time.Now().UnixNano(), 10))
+	return c.getJSONFrom(ctx, c.assetBaseURL, locale, endpoint, label, extra)
+}
+
+func (c *Client) getJSONFrom(
+	ctx context.Context,
+	baseURL, locale, endpoint, label string,
+	extra url.Values,
+) (any, []byte, error) {
+	requestURL, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: invalid base URL: %w", label, err)
 	}
 	requestURL.Path = path.Join(requestURL.Path, endpoint)
 	query := requestURL.Query()
-	query.Set("locale", c.locale)
+	query.Set("locale", locale)
 	query.Set("postal_code", c.postalCode)
+	for key, values := range extra {
+		for _, value := range values {
+			query.Add(key, value)
+		}
+	}
 	requestURL.RawQuery = query.Encode()
 
 	var lastErr error
@@ -127,6 +138,8 @@ func (c *Client) getJSON(ctx context.Context, endpoint, label string) (any, []by
 		}
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", "giftcard-watch/0.1 (+https://github.com/zcjb-ca/giftcard-watch)")
+		req.Header.Set("Referer", "https://flipp.com/")
+		req.Header.Set("Origin", "https://flipp.com")
 
 		resp, err := c.http.Do(req)
 		if err != nil {
@@ -162,6 +175,62 @@ func (c *Client) getJSON(ctx context.Context, endpoint, label string) (any, []by
 		lastErr = fmt.Errorf("%s failed after retries", label)
 	}
 	return nil, nil, lastErr
+}
+
+func parseFlyers(values []map[string]any) []model.Flyer {
+	flyers := make([]model.Flyer, 0, len(values))
+	for _, value := range values {
+		id := firstValue(value, "id", "flyer_id")
+		merchant := firstValue(value, "merchant_name", "merchant", "name")
+		if id == "" || merchant == "" {
+			continue
+		}
+		flyers = append(flyers, model.Flyer{
+			ID:          id,
+			Merchant:    merchant,
+			ValidFrom:   firstTime(value, "valid_from", "start_date", "available_from"),
+			ValidTo:     firstTime(value, "valid_to", "end_date", "available_to"),
+			TilePath:    firstValue(value, "path"),
+			Width:       firstInteger(value, "width"),
+			Height:      firstInteger(value, "height"),
+			Resolutions: numberSlice(value["resolutions"]),
+		})
+	}
+	return flyers
+}
+
+func needsTileMetadata(flyers []model.Flyer) bool {
+	for _, flyer := range flyers {
+		if flyer.TilePath == "" || len(flyer.Resolutions) == 0 || flyer.Height <= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeTileMetadata(flyers, metadata []model.Flyer) {
+	byID := make(map[string]model.Flyer, len(metadata))
+	for _, flyer := range metadata {
+		byID[flyer.ID] = flyer
+	}
+	for index := range flyers {
+		source, ok := byID[flyers[index].ID]
+		if !ok {
+			continue
+		}
+		if flyers[index].TilePath == "" {
+			flyers[index].TilePath = source.TilePath
+		}
+		if flyers[index].Width <= 0 {
+			flyers[index].Width = source.Width
+		}
+		if flyers[index].Height <= 0 {
+			flyers[index].Height = source.Height
+		}
+		if len(flyers[index].Resolutions) == 0 {
+			flyers[index].Resolutions = source.Resolutions
+		}
+	}
 }
 
 func flyerMaps(root any) []map[string]any {

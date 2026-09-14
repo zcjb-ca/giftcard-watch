@@ -1,4 +1,6 @@
 {
+  "base_url": "https://backflipp.wishabi.com/flipp",
+  "asset_base_url": "https://dam.flippenterprise.net/api/flipp",
   "locale": "en-ca",
   "postal_code": "",
   "location_label": "Ottawa, ON",

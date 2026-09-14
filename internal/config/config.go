@@ -37,6 +37,7 @@ type OCR struct {
 
 type Config struct {
 	BaseURL                 string         `json:"base_url"`
+	AssetBaseURL            string         `json:"asset_base_url"`
 	Locale                  string         `json:"locale"`
 	PostalCode              string         `json:"postal_code"`
 	LocationLabel           string         `json:"location_label"`
@@ -53,6 +54,7 @@ var canadianPostalCode = regexp.MustCompile(`^[A-Z]\d[A-Z]\d[A-Z]\d$`)
 func Default() Config {
 	return Config{
 		BaseURL:              "https://backflipp.wishabi.com/flipp",
+		AssetBaseURL:         "https://dam.flippenterprise.net/api/flipp",
 		Locale:               "en-ca",
 		MinimumReturnPercent: 8,
 		HTTPTimeoutSeconds:   25,
@@ -126,6 +128,7 @@ func Load(path string) (Config, error) {
 	cfg.PostalCode = strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(cfg.PostalCode), " ", ""))
 	cfg.Locale = strings.ToLower(strings.TrimSpace(cfg.Locale))
 	cfg.BaseURL = strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
+	cfg.AssetBaseURL = strings.TrimRight(strings.TrimSpace(cfg.AssetBaseURL), "/")
 	cfg.LocationLabel = strings.TrimSpace(cfg.LocationLabel)
 	cfg.OCR.Command = strings.TrimSpace(cfg.OCR.Command)
 	cfg.OCR.Language = strings.TrimSpace(cfg.OCR.Language)
@@ -140,6 +143,8 @@ func (c Config) Validate() error {
 	switch {
 	case c.BaseURL == "":
 		return errors.New("base_url is required")
+	case c.AssetBaseURL == "":
+		return errors.New("asset_base_url is required")
 	case c.Locale == "":
 		return errors.New("locale is required")
 	case c.PostalCode == "":
