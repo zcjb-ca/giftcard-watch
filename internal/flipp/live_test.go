@@ -4,6 +4,7 @@ package flipp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"testing"
@@ -61,5 +62,15 @@ func TestLiveContract(t *testing.T) {
 			flyer.ID, flyer.Merchant, len(detail.Items), detail.DeclaredPages, flyer.TilePath != "")
 		return
 	}
-	t.Fatalf("no sampled flyer satisfied the live contract; failures: %v", failures)
+	assetRoot, _, assetErr := client.getAssetJSON(ctx, "/data", "diagnostic tile metadata")
+	assetSample := ""
+	if assetErr == nil {
+		values := flyerMaps(assetRoot)
+		if len(values) > 0 {
+			if body, err := json.Marshal(values[0]); err == nil {
+				assetSample = string(body)
+			}
+		}
+	}
+	t.Fatalf("no sampled flyer satisfied the live contract; asset error: %v; first asset flyer: %s; failures: %v", assetErr, assetSample, failures)
 }
