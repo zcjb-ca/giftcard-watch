@@ -4,6 +4,7 @@ package flipp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"testing"
@@ -38,8 +39,9 @@ func TestLiveContract(t *testing.T) {
 		limit = 12
 	}
 	failures := make([]string, 0)
+	pageSample := ""
 	for _, flyer := range flyers[:limit] {
-		detail, _, err := client.FetchDetail(ctx, flyer.ID)
+		detail, raw, err := client.FetchDetail(ctx, flyer.ID)
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", flyer.ID, err))
 			continue
@@ -53,6 +55,16 @@ func TestLiveContract(t *testing.T) {
 			continue
 		}
 		if detail.DeclaredPages-detail.MissingPageImages == 0 {
+			if pageSample == "" {
+				var root map[string]any
+				if json.Unmarshal(raw, &root) == nil {
+					if pages, ok := root["pages"].([]any); ok && len(pages) > 0 {
+						if sample, err := json.Marshal(pages[0]); err == nil {
+							pageSample = string(sample)
+						}
+					}
+				}
+			}
 			failures = append(failures, fmt.Sprintf("%s: no usable page image URL", flyer.ID))
 			continue
 		}
@@ -60,5 +72,5 @@ func TestLiveContract(t *testing.T) {
 			flyer.ID, flyer.Merchant, len(detail.Items), detail.DeclaredPages)
 		return
 	}
-	t.Fatalf("no sampled flyer satisfied the live contract; failures: %v", failures)
+	t.Fatalf("no sampled flyer satisfied the live contract; first page sample: %s; failures: %v", pageSample, failures)
 }
