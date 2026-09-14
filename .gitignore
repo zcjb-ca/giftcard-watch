@@ -1,0 +1,7 @@
+/giftcard-watch
+/.giftcard-watch/
+/data/
+/raw/
+config/config.json
+.env
+.DS_Store
